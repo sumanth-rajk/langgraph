@@ -1,0 +1,275 @@
+{
+  "workflow": {
+    "description": "SyneBank Personal Credit Card Cancellation Process - End-to-End Workflow",
+    "activities": [
+      {
+        "id": "initiate_cancellation_request",
+        "type": "user_input",
+        "description": "Customer initiates cancellation request via approved channels and provides required identification details.",
+        "inputs": ["full_name", "card_number_or_last4", "authentication_info"],
+        "outputs": ["cancellation_request_id"],
+        "next": "authenticate_customer"
+      },
+
+      {
+        "id": "authenticate_customer",
+        "type": "api_call",
+        "description": "Authenticate customer identity using provided information (OTP, security questions, etc.).",
+        "api_integration": {
+          "endpoint": "https://4vh3ppo32pwfglm2yqkhv3eum40cnfej.lambda-url.us-east-1.on.aws/",
+          "method": "POST",
+          "payload": {
+            "full_name": "<from full_name>",
+            "card_number_or_last4": "<from card_number_or_last4>",
+            "authentication_info": "<from authentication_info>"
+          }
+        },
+        "outputs": ["authentication_status"],
+        "next": [
+          { "condition": "authentication_status == 'success'", "activity": "preliminary_checks" },
+          { "condition": "authentication_status == 'failure'", "activity": "notify_authentication_failure" }
+        ]
+      },
+
+      {
+        "id": "notify_authentication_failure",
+        "type": "notification",
+        "description": "Notify customer of authentication failure and end process.",
+        "inputs": ["cancellation_request_id"],
+        "next": "end_process"
+      },
+
+      {
+        "id": "preliminary_checks",
+        "type": "api_call",
+        "description": "Check card status for flags such as lost/stolen, fraud, or legal/regulatory holds.",
+        "api_integration": {
+          "endpoint": "https://ngozcis7vnnhahamccm33dzlru0dcfzi.lambda-url.us-east-1.on.aws/",
+          "method": "GET",
+          "params": { "card_number": "<from card_number_or_last4>" }
+        },
+        "outputs": ["card_status", "restriction_reason"],
+        "next": [
+          { "condition": "card_status in ['legal_hold', 'fraud_investigation', 'other_restriction']", "activity": "notify_cancellation_blocked" },
+          { "condition": "card_status == 'clear'", "activity": "check_outstanding_balance" }
+        ]
+      },
+
+      {
+        "id": "notify_cancellation_blocked",
+        "type": "notification",
+        "description": "Inform customer that cancellation is blocked due to specific restriction (e.g., legal hold, fraud investigation).",
+        "inputs": ["restriction_reason"],
+        "next": "end_process"
+      },
+
+      {
+        "id": "check_outstanding_balance",
+        "type": "api_call",
+        "description": "Verify if there is any outstanding balance on the card.",
+        "api_integration": {
+          "endpoint": "https://wnpa2chqcb7ys2nlumnpjq4kfa0jrbzo.lambda-url.us-east-1.on.aws/",
+          "method": "GET",
+          "params": { "card_number": "<from card_number_or_last4>" }
+        },
+        "outputs": ["outstanding_balance"],
+        "next": [
+          { "condition": "outstanding_balance > CONFIG_BALANCE_THRESHOLD", "activity": "notify_balance_due" },
+          { "condition": "outstanding_balance <= CONFIG_BALANCE_THRESHOLD", "activity": "check_pending_transactions" }
+        ]
+      },
+
+      {
+        "id": "notify_balance_due",
+        "type": "notification",
+        "description": "Notify customer of outstanding balance and provide payment options. Pause process until balance is cleared.",
+        "inputs": ["outstanding_balance"],
+        "next": "pause_until_balance_cleared"
+      },
+      {
+        "id": "pause_until_balance_cleared",
+        "type": "pause",
+        "description": "Wait for customer to clear outstanding balance. Process resumes upon confirmation of zero balance.",
+        "resume_condition": "outstanding_balance <= CONFIG_BALANCE_THRESHOLD",
+        "next": "check_pending_transactions"
+      },
+
+      {
+        "id": "check_pending_transactions",
+        "type": "api_call",
+        "description": "Check for any pending transactions or recurring payments (subscriptions, autopay).",
+        "api_integration": {
+          "endpoint": "https://wfg2yckqlwmx7af5yvxj3u5l640zclov.lambda-url.us-east-1.on.aws/",
+          "method": "GET",
+          "params": { "card_number": "<from card_number_or_last4>" }
+        },
+        "outputs": ["pending_transactions", "recurring_payments"],
+        "next": [
+          { "condition": "len(pending_transactions) > 0 or len(recurring_payments) > 0", "activity": "notify_pending_transactions" },
+          { "condition": "len(pending_transactions) == 0 and len(recurring_payments) == 0", "activity": "check_reward_points" }
+        ]
+      },
+
+      {
+        "id": "notify_pending_transactions",
+        "type": "notification",
+        "description": "Advise customer to transfer/cancel pending transactions or recurring payments. Pause process until resolved.",
+        "inputs": ["pending_transactions", "recurring_payments"],
+        "next": "pause_until_transactions_cleared"
+      },
+      {
+        "id": "pause_until_transactions_cleared",
+        "type": "pause",
+        "description": "Wait for customer to resolve all pending transactions and recurring payments.",
+        "resume_condition": "len(pending_transactions) == 0 and len(recurring_payments) == 0",
+        "next": "check_reward_points"
+      },
+
+      {
+        "id": "check_reward_points",
+        "type": "api_call",
+        "description": "Check for unredeemed reward points.",
+        "api_integration": {
+          "endpoint": "https://cmjbubakubvsrgtn4vi4z55p7u0iydkx.lambda-url.us-east-1.on.aws/",
+          "method": "GET",
+          "params": { "card_number": "<from card_number_or_last4>" }
+        },
+        "outputs": ["reward_points_balance"],
+        "next": [
+          { "condition": "reward_points_balance > 0", "activity": "handle_reward_points" },
+          { "condition": "reward_points_balance == 0", "activity": "final_eligibility_check" }
+        ]
+      },
+
+      {
+        "id": "handle_reward_points",
+        "type": "user_choice",
+        "description": "Prompt customer to choose reward points disposition: redeem, transfer, or forfeit.",
+        "inputs": ["reward_points_balance"],
+        "choices": [
+          { "option": "redeem_statement_credit", "next": "redeem_points_statement_credit" },
+          { "option": "transfer_to_account",     "next": "transfer_points_to_account"    },
+          { "option": "forfeit_points",          "next": "forfeit_reward_points"         }
+        ]
+      },
+
+      {
+        "id": "redeem_points_statement_credit",
+        "type": "api_call",
+        "description": "Redeem reward points as statement credit to offset outstanding balance.",
+        "api_integration": {
+          "endpoint": "https://lchi2twtmxc7j2rgt3zco7lh2a0syvsm.lambda-url.us-east-1.on.aws/",
+          "method": "POST",
+          "payload": {
+            "card_number": "<from card_number_or_last4>",
+            "points": "<from reward_points_balance>"
+          }
+        },
+        "outputs": ["updated_balance"],
+        "next": "final_eligibility_check"
+      },
+
+      {
+        "id": "transfer_points_to_account",
+        "type": "api_call",
+        "description": "Transfer reward points to eligible SyneBank savings/checking account.",
+        "api_integration": {
+          "endpoint": "https://lu4y6ztbc47ez2czyiqv5fq6ji0ijhvm.lambda-url.us-east-1.on.aws/",
+          "method": "POST",
+          "payload": {
+            "card_number": "<from card_number_or_last4>",
+            "points": "<from reward_points_balance>",
+            "destination_account": "<user_selected>"
+          }
+        },
+        "next": "final_eligibility_check"
+      },
+
+      {
+        "id": "forfeit_reward_points",
+        "type": "api_call",
+        "description": "Forfeit reward points after explicit customer confirmation.",
+        "api_integration": {
+          "endpoint": "https://tr7fvsjqy74ey22kkz5f4td2qe0sjtsp.lambda-url.us-east-1.on.aws/",
+          "method": "POST",
+          "payload": {
+            "card_number": "<from card_number_or_last4>",
+            "points": "<from reward_points_balance>"
+          }
+        },
+        "next": "final_eligibility_check"
+      },
+
+      {
+        "id": "final_eligibility_check",
+        "type": "api_call",
+        "description": "Confirm all closure criteria: zero balance, no pending transactions, reward points handled.",
+        "api_integration": {
+          "endpoint": "https://7i3zswj2lfy3ulm46zkdqxc46a0gowtt.lambda-url.us-east-1.on.aws/",
+          "method": "GET",
+          "params": { "card_number": "<from card_number_or_last4>" }
+        },
+        "outputs": ["all_criteria_met", "unmet_requirements"],
+        "next": [
+          { "condition": "all_criteria_met == True",  "activity": "closure_authorization"   },
+          { "condition": "all_criteria_met == False", "activity": "notify_unmet_requirements"}
+        ]
+      },
+
+      {
+        "id": "notify_unmet_requirements",
+        "type": "notification",
+        "description": "Notify customer of unmet requirements (e.g., balance, pending transactions, reward points). Provide actionable steps.",
+        "inputs": ["unmet_requirements"],
+        "next": "end_process"
+      },
+
+      {
+        "id": "closure_authorization",
+        "type": "api_call",
+        "description": "Generate closure request for approval if required by policy (e.g., high-value cards), then execute closure.",
+        "api_integration": {
+          "endpoint": "https://jodrp2i7wskywfctfmohxcbuu40zzmyn.lambda-url.us-east-1.on.aws/",
+          "method": "POST",
+          "payload": { "card_number": "<from card_number_or_last4>" }
+        },
+        "outputs": ["closure_approved"],
+        "next": [
+          { "condition": "closure_approved == True",  "activity": "close_card_account" },
+          { "condition": "closure_approved == False", "activity": "notify_closure_denied" }
+        ]
+      },
+
+      {
+        "id": "notify_closure_denied",
+        "type": "notification",
+        "description": "Notify customer that closure authorization was denied. End process.",
+        "inputs": [],
+        "next": "end_process"
+      },
+
+      {
+        "id": "close_card_account",
+        "type": "api_call",
+        "description": "Mark card account as 'Closed by Customer' in core banking systems and generate confirmation.",
+        "api_integration": {
+          "endpoint": "https://6nf6lfpq4yxkes4ntq5t6ru7mi0zmuow.lambda-url.us-east-1.on.aws/",
+          "method": "POST",
+          "payload": { "card_number": "<from card_number_or_last4>" }
+        },
+        "outputs": ["closure_confirmation"],
+        "next": "send_closure_confirmation"
+      },
+
+      {
+        "id": "send_closure_confirmation",
+        "type": "notification",
+        "description": "Send written closure confirmation to customer (email, SMS, or letter) with closure date and reference number.",
+        "inputs": ["closure_confirmation"],
+        "next": "end_process"
+      },
+
+      { "id": "end_process", "type": "end", "description": "End of workflow." }
+    ]
+  }
+}

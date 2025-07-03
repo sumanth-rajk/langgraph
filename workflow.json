@@ -1,0 +1,408 @@
+{
+  "workflow": {
+    "description": "SyneBank Personal Credit Card Cancellation Process - End-to-End Workflow",
+    "activities": [
+      {
+        "id": "initiate_cancellation_request",
+        "type": "user_input",
+        "description": "Customer initiates cancellation request via approved channels and provides required identification details.",
+        "inputs": ["full_name", "card_number_or_last4", "authentication_info"],
+        "outputs": ["cancellation_request_id"],
+        "next": "authenticate_customer"
+      },
+      {
+        "id": "authenticate_customer",
+        "type": "api_call",
+        "description": "Authenticate customer identity using provided information (OTP, security questions, etc.).",
+        "api_integration": {
+          "endpoint": "<AUTH_API_ENDPOINT>",
+          "method": "POST",
+          "payload": {
+            "cancellation_request_id": "<from initiate_cancellation_request>",
+            "authentication_info": "<from initiate_cancellation_request>"
+          }
+        },
+        "outputs": ["authentication_status"],
+        "next": [
+          {
+            "condition": "authentication_status == 'success'",
+            "activity": "preliminary_checks"
+          },
+          {
+            "condition": "authentication_status == 'failure'",
+            "activity": "notify_authentication_failure"
+          }
+        ]
+      },
+      {
+        "id": "notify_authentication_failure",
+        "type": "notification",
+        "description": "Notify customer of authentication failure and end process.",
+        "inputs": ["cancellation_request_id"],
+        "next": "end_process"
+      },
+      {
+        "id": "preliminary_checks",
+        "type": "api_call",
+        "description": "Check card status for flags such as lost/stolen, fraud, or legal/regulatory holds.",
+        "api_integration": {
+          "endpoint": "<CARD_STATUS_API_ENDPOINT>",
+          "method": "GET",
+          "params": {
+            "card_number": "<from initiate_cancellation_request>"
+          }
+        },
+        "outputs": ["card_status", "restriction_reason"],
+        "next": [
+          {
+            "condition": "card_status in ['legal_hold', 'fraud_investigation', 'other_restriction']",
+            "activity": "notify_cancellation_blocked"
+          },
+          {
+            "condition": "card_status == 'clear'",
+            "activity": "check_outstanding_balance"
+          }
+        ]
+      },
+      {
+        "id": "notify_cancellation_blocked",
+        "type": "notification",
+        "description": "Inform customer that cancellation is blocked due to specific restriction (e.g., legal hold, fraud investigation).",
+        "inputs": ["restriction_reason"],
+        "next": "end_process"
+      },
+      {
+        "id": "check_outstanding_balance",
+        "type": "api_call",
+        "description": "Verify if there is any outstanding balance on the card.",
+        "api_integration": {
+          "endpoint": "<BALANCE_API_ENDPOINT>",
+          "method": "GET",
+          "params": {
+            "card_number": "<from initiate_cancellation_request>"
+          }
+        },
+        "outputs": ["outstanding_balance"],
+        "next": [
+          {
+            "condition": "outstanding_balance > CONFIG_BALANCE_THRESHOLD",
+            "activity": "notify_balance_due"
+          },
+          {
+            "condition": "outstanding_balance <= CONFIG_BALANCE_THRESHOLD",
+            "activity": "check_pending_transactions"
+          }
+        ]
+      },
+      {
+        "id": "notify_balance_due",
+        "type": "notification",
+        "description": "Notify customer of outstanding balance and provide payment options. Pause process until balance is cleared.",
+        "inputs": ["outstanding_balance"],
+        "next": "pause_until_balance_cleared"
+      },
+      {
+        "id": "pause_until_balance_cleared",
+        "type": "pause",
+        "description": "Wait for customer to clear outstanding balance. Process resumes upon confirmation of zero balance.",
+        "resume_condition": "outstanding_balance <= CONFIG_BALANCE_THRESHOLD",
+        "next": "check_pending_transactions"
+      },
+      {
+        "id": "check_pending_transactions",
+        "type": "api_call",
+        "description": "Check for any pending transactions or recurring payments (subscriptions, autopay).",
+        "api_integration": {
+          "endpoint": "<PENDING_TXN_API_ENDPOINT>",
+          "method": "GET",
+          "params": {
+            "card_number": "<from initiate_cancellation_request>"
+          }
+        },
+        "outputs": ["pending_transactions", "recurring_payments"],
+        "next": [
+          {
+            "condition": "pending_transactions.length > 0 || recurring_payments.length > 0",
+            "activity": "notify_pending_transactions"
+          },
+          {
+            "condition": "pending_transactions.length == 0 && recurring_payments.length == 0",
+            "activity": "check_reward_points"
+          }
+        ]
+      },
+      {
+        "id": "notify_pending_transactions",
+        "type": "notification",
+        "description": "Advise customer to transfer/cancel pending transactions or recurring payments. Pause process until resolved.",
+        "inputs": ["pending_transactions", "recurring_payments"],
+        "next": "pause_until_transactions_cleared"
+      },
+      {
+        "id": "pause_until_transactions_cleared",
+        "type": "pause",
+        "description": "Wait for customer to resolve all pending transactions and recurring payments.",
+        "resume_condition": "pending_transactions.length == 0 && recurring_payments.length == 0",
+        "next": "check_reward_points"
+      },
+      {
+        "id": "check_reward_points",
+        "type": "api_call",
+        "description": "Check for unredeemed reward points.",
+        "api_integration": {
+          "endpoint": "<REWARD_POINTS_API_ENDPOINT>",
+          "method": "GET",
+          "params": {
+            "card_number": "<from initiate_cancellation_request>"
+          }
+        },
+        "outputs": ["reward_points_balance"],
+        "next": [
+          {
+            "condition": "reward_points_balance > 0",
+            "activity": "handle_reward_points"
+          },
+          {
+            "condition": "reward_points_balance == 0",
+            "activity": "final_eligibility_check"
+          }
+        ]
+      },
+      {
+        "id": "handle_reward_points",
+        "type": "user_choice",
+        "description": "Prompt customer to choose reward points disposition: redeem, transfer, or forfeit.",
+        "inputs": ["reward_points_balance"],
+        "choices": [
+          {
+            "option": "redeem_statement_credit",
+            "next": "redeem_points_statement_credit"
+          },
+          {
+            "option": "transfer_to_account",
+            "next": "transfer_points_to_account"
+          },
+          {
+            "option": "forfeit_points",
+            "next": "forfeit_reward_points"
+          }
+        ]
+      },
+      {
+        "id": "redeem_points_statement_credit",
+        "type": "api_call",
+        "description": "Redeem reward points as statement credit to offset outstanding balance.",
+        "api_integration": {
+          "endpoint": "<REDEEM_POINTS_API_ENDPOINT>",
+          "method": "POST",
+          "payload": {
+            "card_number": "<from initiate_cancellation_request>",
+            "points": "<from check_reward_points>"
+          }
+        },
+        "outputs": ["updated_balance"],
+        "next": "final_eligibility_check"
+      },
+      {
+        "id": "transfer_points_to_account",
+        "type": "api_call",
+        "description": "Transfer reward points to eligible SyneBank savings/checking account.",
+        "api_integration": {
+          "endpoint": "<TRANSFER_POINTS_API_ENDPOINT>",
+          "method": "POST",
+          "payload": {
+            "card_number": "<from initiate_cancellation_request>",
+            "points": "<from check_reward_points>",
+            "destination_account": "<user_selected>"
+          }
+        },
+        "next": "final_eligibility_check"
+      },
+      {
+        "id": "forfeit_reward_points",
+        "type": "api_call",
+        "description": "Forfeit reward points after explicit customer confirmation.",
+        "api_integration": {
+          "endpoint": "<FORFEIT_POINTS_API_ENDPOINT>",
+          "method": "POST",
+          "payload": {
+            "card_number": "<from initiate_cancellation_request>",
+            "points": "<from check_reward_points>"
+          }
+        },
+        "next": "final_eligibility_check"
+      },
+      {
+        "id": "final_eligibility_check",
+        "type": "api_call",
+        "description": "Confirm all closure criteria: zero balance, no pending transactions, reward points handled.",
+        "api_integration": {
+          "endpoint": "<FINAL_ELIGIBILITY_API_ENDPOINT>",
+          "method": "GET",
+          "params": {
+            "card_number": "<from initiate_cancellation_request>"
+          }
+        },
+        "outputs": ["all_criteria_met", "unmet_requirements"],
+        "next": [
+          {
+            "condition": "all_criteria_met == true",
+            "activity": "closure_authorization"
+          },
+          {
+            "condition": "all_criteria_met == false",
+            "activity": "notify_unmet_requirements"
+          }
+        ]
+      },
+      {
+        "id": "notify_unmet_requirements",
+        "type": "notification",
+        "description": "Notify customer of unmet requirements (e.g., balance, pending transactions, reward points). Provide actionable steps.",
+        "inputs": ["unmet_requirements"],
+        "next": "end_process"
+      },
+      {
+        "id": "closure_authorization",
+        "type": "api_call",
+        "description": "Generate closure request for approval if required by policy (e.g., high-value cards), then execute closure.",
+        "api_integration": {
+          "endpoint": "<CLOSURE_AUTH_API_ENDPOINT>",
+          "method": "POST",
+          "payload": {
+            "card_number": "<from initiate_cancellation_request>"
+          }
+        },
+        "outputs": ["closure_approved"],
+        "next": [
+          {
+            "condition": "closure_approved == true",
+            "activity": "close_card_account"
+          },
+          {
+            "condition": "closure_approved == false",
+            "activity": "notify_closure_denied"
+          }
+        ]
+      },
+      {
+        "id": "notify_closure_denied",
+        "type": "notification",
+        "description": "Notify customer that closure authorization was denied. End process.",
+        "inputs": [],
+        "next": "end_process"
+      },
+      {
+        "id": "close_card_account",
+        "type": "api_call",
+        "description": "Mark card account as 'Closed by Customer' in core banking systems and generate confirmation.",
+        "api_integration": {
+          "endpoint": "<CLOSE_ACCOUNT_API_ENDPOINT>",
+          "method": "POST",
+          "payload": {
+            "card_number": "<from initiate_cancellation_request>"
+          }
+        },
+        "outputs": ["closure_confirmation"],
+        "next": [
+          {
+            "activity": "send_closure_confirmation"
+          },
+          {
+            "activity": "card_deactivation_and_disposal"
+          }
+        ]
+      },
+      {
+        "id": "send_closure_confirmation",
+        "type": "notification",
+        "description": "Send written closure confirmation to customer (email, SMS, or letter) with closure date and reference number.",
+        "inputs": ["closure_confirmation"],
+        "next": null
+      },
+      {
+        "id": "card_deactivation_and_disposal",
+        "type": "parallel",
+        "description": "Parallel execution: (1) Deactivate card in all systems, (2) Instruct customer to destroy/return card.",
+        "branches": [
+          {
+            "id": "deactivate_card",
+            "type": "api_call",
+            "description": "Deactivate card in all systems to prevent future use.",
+            "api_integration": {
+              "endpoint": "<DEACTIVATE_CARD_API_ENDPOINT>",
+              "method": "POST",
+              "payload": {
+                "card_number": "<from initiate_cancellation_request>"
+              }
+            },
+            "next": "post_closure_activities"
+          },
+          {
+            "id": "instruct_card_disposal",
+            "type": "notification",
+            "description": "Instruct customer to destroy card (cut/shred) or return metal card for secure disposal.",
+            "inputs": ["card_type"],
+            "next": null
+          }
+        ]
+      },
+      {
+        "id": "post_closure_activities",
+        "type": "parallel",
+        "description": "Parallel execution: (1) Update credit bureau, (2) Monitor for residual charges.",
+        "branches": [
+          {
+            "id": "update_credit_bureau",
+            "type": "api_call",
+            "description": "Update credit bureau records to reflect account closure as 'Closed by Customer'.",
+            "api_integration": {
+              "endpoint": "<CREDIT_BUREAU_API_ENDPOINT>",
+              "method": "POST",
+              "payload": {
+                "card_number": "<from initiate_cancellation_request>",
+                "status": "Closed by Customer"
+              }
+            },
+            "next": null
+          },
+          {
+            "id": "monitor_residual_charges",
+            "type": "api_call",
+            "description": "Monitor account for residual charges (e.g., late-posting transactions) for defined period; notify customer and initiate settlement if detected.",
+            "api_integration": {
+              "endpoint": "<RESIDUAL_CHARGES_MONITOR_API_ENDPOINT>",
+              "method": "GET",
+              "params": {
+                "card_number": "<from initiate_cancellation_request>"
+              }
+            },
+            "outputs": ["residual_charge_detected"],
+            "next": [
+              {
+                "condition": "residual_charge_detected == true",
+                "activity": "notify_residual_charge"
+              },
+              {
+                "condition": "residual_charge_detected == false",
+                "activity": null
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "notify_residual_charge",
+        "type": "notification",
+        "description": "Notify customer of residual charge and provide settlement options.",
+        "inputs": ["residual_charge_details"],
+        "next": null
+      },
+      {
+        "id": "end_process",
+        "type": "end",
+        "description": "End of workflow."
+      }
+    ]
+  }
+}
